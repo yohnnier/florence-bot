@@ -1,5 +1,5 @@
 Flask==2.3.2
-openai==1.3.7
+openai==1.25.0          # última versión estable (corrige el bug con httpx)
 twilio==8.10.1
 gunicorn==21.2.0
 tinydb==4.8.0
