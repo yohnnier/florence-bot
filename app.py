@@ -7,9 +7,10 @@ import time
 app = Flask(__name__)
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
+# Ruta raíz para probar que la app está funcionando
 @app.route("/", methods=["GET"])
 def home():
-    return "Florence bot está activo 🚀"
+    return "Florence bot está en línea y operativo. 🚀"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -29,7 +30,7 @@ def webhook():
         assistant_id=assistant_id
     )
 
-    # Esperar a que el run termine (máx. 15 segundos)
+    # Esperar a que finalice
     for _ in range(15):
         run_check = openai.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
         if run_check.status == "completed":
@@ -38,16 +39,11 @@ def webhook():
 
     messages = openai.beta.threads.messages.list(thread_id=thread.id)
     reply = "No se pudo generar respuesta."
-    
+
     for msg in messages.data:
         if msg.role == "assistant":
             reply = msg.content[0].text.value
             break
-
-    twilio_resp = MessagingResponse()
-    twilio_resp.message(reply)
-    return str(twilio_resp)
-
 
     twilio_resp = MessagingResponse()
     twilio_resp.message(reply)
