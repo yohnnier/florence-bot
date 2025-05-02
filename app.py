@@ -1,84 +1,93 @@
+# app.py
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
-from tinydb import TinyDB, Query                    # ⬅️ NEW
-import openai
-import os
-import time
+from openai import OpenAI
+import os, time, logging
 
-# ------------- configuración básica -------------
+# ------------------------------------------------------------------
+# CONFIGURACIÓN BÁSICA
+# ------------------------------------------------------------------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ASSISTANT_ID   = os.getenv("ASSISTANT_ID")   # ← id del Assistant que creaste
+
+#  🔑  Cliente OpenAI con cabecera obligatoria `assistants=v2`
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    default_headers={"OpenAI-Beta": "assistants=v2"},
+)
+
 app = Flask(__name__)
-openai.api_key = os.getenv("OPENAI_API_KEY")
-assistant_id = os.getenv("ASSISTANT_ID")
-
-# base de datos local (archivo JSON de pocas KB)
-db = TinyDB("threads.json")
-Q  = Query()
-# ------------------------------------------------
+logging.basicConfig(level=logging.INFO)
 
 
-# ---------- RUTA RAÍZ ----------
+# ------------------------------------------------------------------
+# RUTA DE SALUD
+# ------------------------------------------------------------------
 @app.route("/", methods=["GET"])
-def home():
+def healthcheck():
     return "Florence bot está en línea y operativo. 🚀"
-# --------------------------------
 
 
-# ---------- WEBHOOK DE WHATSAPP ----------
+# ------------------------------------------------------------------
+# WEBHOOK PARA TWILIO / WHATSAPP
+# ------------------------------------------------------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # 1. mensaje entrante
-    incoming_msg  = request.values.get("Body", "").strip()
-    user_number   = request.values.get("From", "")  # ej. '+1415xxxx'
+    incoming_msg = request.values.get("Body", "").strip()
+
+    resp_twilio = MessagingResponse()
+
     if not incoming_msg:
-        return "OK"
+        resp_twilio.message("No recibí ningún texto. ¿Podrías repetirlo?")
+        return str(resp_twilio)
 
-    # 2. buscar / crear thread para ese usuario
-    row = db.get(Q.user == user_number)
-    if row:
-        thread_id = row["thread"]
-    else:
-        thread_id = openai.beta.threads.create().id
-        db.insert({"user": user_number, "thread": thread_id})
-
-    # 3. agregar mensaje del usuario
-    openai.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=incoming_msg
-    )
-
-    # 4. iniciar ejecución del assistant
-    run = openai.beta.threads.runs.create(
-        thread_id=thread_id,
-        assistant_id=assistant_id
-    )
-
-    # 5. esperar a que termine (máx 15 s)
-    for _ in range(15):
-        run_check = openai.beta.threads.runs.retrieve(
-            thread_id=thread_id, run_id=run.id
-        )
-        if run_check.status == "completed":
-            break
-        time.sleep(1)
-
-    # 6. obtener la última respuesta del assistant
-    reply = "Lo siento, tardé demasiado en generar respuesta."
     try:
-        msgs = openai.beta.threads.messages.list(thread_id=thread_id)
-        for msg in msgs.data:
-            if msg.role == "assistant":
-                reply = msg.content[0].text.value
+        # 1. Crea un hilo
+        thread = client.beta.threads.create()
+
+        # 2. Añade el mensaje del usuario
+        client.beta.threads.messages.create(
+            thread_id=thread.id,
+            role="user",
+            content=incoming_msg,
+        )
+
+        # 3. Lanza la ejecución con tu Assistant
+        run = client.beta.threads.runs.create(
+            thread_id=thread.id,
+            assistant_id=ASSISTANT_ID,
+        )
+
+        # 4. Espera hasta 15 s a que finalice
+        for _ in range(15):
+            run_check = client.beta.threads.runs.retrieve(
+                thread_id=thread.id,
+                run_id=run.id,
+            )
+            if run_check.status == "completed":
                 break
+            time.sleep(1)
+
+        # 5. Obtiene la primera respuesta del Assistant
+        reply = "Lo siento, no pude generar respuesta a tiempo."
+        msgs = client.beta.threads.messages.list(thread_id=thread.id)
+        for m in msgs.data:
+            if m.role == "assistant":
+                reply = m.content[0].text.value
+                break
+
     except Exception as e:
-        reply = f"Error al obtener respuesta: {e}"
+        logging.exception("Error procesando mensaje")
+        reply = "❌ Ocurrió un error interno. Inténtalo de nuevo en unos minutos."
 
-    # 7. enviar de vuelta a WhatsApp
-    tw_resp = MessagingResponse()
-    tw_resp.message(reply)
-    return str(tw_resp)
-# ----------------------------------------------
+    # 6. Devuelve la respuesta a WhatsApp
+    resp_twilio.message(reply)
+    return str(resp_twilio)
 
 
+# ------------------------------------------------------------------
+# EJECUCIÓN LOCAL (opcional)
+# ------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000, debug=False)
+    # Solo para pruebas locales:  flask run  ó  python app.py
+    app.run(debug=True, port=5000)
