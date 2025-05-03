@@ -1,4 +1,4 @@
-# ── imports ───────────────────────────────────────────
+# ── imports ────────────────────────────────────────────
 import os
 import time
 import threading
@@ -10,61 +10,63 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client as TwilioRest
 from openai import OpenAI
 
-# ── configuración de logging ──────────────────────────
+# ── configuración de logging ───────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s  %(levelname)s  %(message)s",
     stream=sys.stdout,
 )
 logger = logging.getLogger("florence-bot")
 
-# ── Flask ─────────────────────────────────────────────
+# ── Flask ──────────────────────────────────────────────
 app = Flask(__name__)
 
-# ── OpenAI client (SDK v2, Assistants v2) ─────────────
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-openai_client.default_headers = {"OpenAI-Beta": "assistants=v2"}
+# ── OpenAI client (SDK v2 + Assistants v2) ─────────────
+openai_client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    default_headers={"OpenAI-Beta": "assistants=v2"},
+)
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 
-# ── Twilio REST (para la respuesta asíncrona) ─────────
+# ── Twilio REST (para la respuesta asíncrona) ──────────
 twilio_rest = TwilioRest(
     os.getenv("TWILIO_ACCOUNT_SID"),
     os.getenv("TWILIO_AUTH_TOKEN"),
 )
-TWILIO_FROM = "whatsapp:+13158123738"  # tu número sandbox/validado
+TWILIO_FROM = "whatsapp:+13158123738"        # tu sandbox / número verificado
+MAX_LEN = 1500                               # margen de seguridad (< 1600)
 
-# ──────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────
 @app.get("/")
 def home():
-    return "Florence bot en línea 🚀"
+    return "Florence bot en línea 🚀"
 
-# ---------- webhook ---------- #
+# ---------- webhook (ACK inmediato) -------------------
 @app.post("/webhook")
 def webhook():
-    """Recibe el mensaje de WhatsApp y responde ACK inmediato."""
     incoming = request.values.get("Body", "").strip()
     from_number = request.values.get("From")
 
     if not incoming:
         abort(400, "mensaje vacío")
 
-    # 1. enviar acuse inmediato
+    # 1. ACK rápido
     twiml = MessagingResponse()
     twiml.message("✔️ Recibido, dame unos segundos…")
 
-    # 2. procesar en un hilo aparte
+    # 2. procesar en segundo plano
     threading.Thread(
         target=wait_and_reply,
         args=(incoming, from_number),
-        daemon=True
+        daemon=True,
     ).start()
 
     return str(twiml)
 
-# ------- tarea en 2º plano ---------- #
+# ---------- tarea asíncrona ---------------------------
 def wait_and_reply(user_msg: str, to_number: str):
     try:
-        # 1) crear hilo y run
+        # 1) crear hilo + run
         thread = openai_client.beta.threads.create()
         openai_client.beta.threads.messages.create(
             thread_id=thread.id,
@@ -76,10 +78,11 @@ def wait_and_reply(user_msg: str, to_number: str):
             assistant_id=ASSISTANT_ID,
         )
 
-        # 2) esperar a que termine (máx 60 s)
+        # 2) esperar hasta 60 s
         for _ in range(60):
             run = openai_client.beta.threads.runs.retrieve(
-                thread_id=thread.id, run_id=run.id
+                thread_id=thread.id,
+                run_id=run.id,
             )
             if run.status == "completed":
                 break
@@ -88,7 +91,7 @@ def wait_and_reply(user_msg: str, to_number: str):
                 return
             time.sleep(1)
 
-        # 3) obtener respuesta del assistant
+        # 3) extraer respuesta
         msgs = openai_client.beta.threads.messages.list(thread_id=thread.id)
         answer = next(
             (m.content[0].text.value for m in msgs.data if m.role == "assistant"),
@@ -100,22 +103,17 @@ def wait_and_reply(user_msg: str, to_number: str):
         logger.error("Error en wait_and_reply: %s", e, exc_info=True)
         send_msg("⚠️ Error interno. Vuelve a intentarlo más tarde.", to_number)
 
-# ---------- envío con troceo (≤ 1600 chars) ----------- #
-MAX_LEN = 1500  # 1600 es el máximo oficial; dejamos margen de seguridad
-
+# ---------- envío (troceo automático) -----------------
 def send_msg(body: str, to: str):
-    """Envía uno o varios WhatsApp si la respuesta es muy larga."""
-    parts: list[str] = []
     text = body.strip()
+    parts: list[str] = []
 
     while len(text) > MAX_LEN:
-        # intenta cortar en el último salto de línea antes del límite
         cut = text.rfind("\n", 0, MAX_LEN)
         if cut == -1:
             cut = MAX_LEN
         parts.append(text[:cut].rstrip())
         text = text[cut:].lstrip()
-
     parts.append(text)
 
     for segment in parts:
@@ -124,9 +122,9 @@ def send_msg(body: str, to: str):
             to=to,
             body=segment,
         )
-        time.sleep(0.3)  # micro‑pausa opcional
+        time.sleep(0.3)       # pequeña pausa opcional
 
-# ── ejecución local ───────────────────────────────────
+# ── ejecución local -----------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
