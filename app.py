@@ -52,7 +52,7 @@ def webhook():
 
     # 1. ACK rápido
     twiml = MessagingResponse()
-    twiml.message("✔️ Recibido, dame unos segundos…")
+    twiml.message("Procesando… ⏳estoy trabajando para ti, mientras tanto tomemos un café ☕")
 
     # 2. procesar en segundo plano
     threading.Thread(
