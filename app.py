@@ -1,117 +1,103 @@
+# app.py
 from flask import Flask, request, abort
 from twilio.twiml.messaging_response import MessagingResponse
 from openai import OpenAI
 import os, time, logging, sys
 
-# Configuración de logging
+# ── Logging básico ─────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("florence‑bot")
 
+# ── Flask ──────────────────────────────────────────────────────
 app = Flask(__name__)
 
-# ── OpenAI client ──────────────────────────────────────────────
+# ── Cliente OpenAI (SDK v1.23.2) ───────────────────────────────
 try:
-    # Inicializar cliente usando solo api_key (sin proxies)
-    openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    # Añadir headers para assistants v2 después de la inicialización
-    openai_client.default_headers = {"OpenAI-Beta": "assistants=v2"}
+    openai_client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        # Usamos Assistants v2
+        default_headers={"OpenAI-Beta": "assistants=v2"},
+    )
     ASSISTANT_ID = os.getenv("ASSISTANT_ID")
-    logger.info("Cliente OpenAI inicializado correctamente")
+    if not ASSISTANT_ID:
+        raise RuntimeError("La variable ASSISTANT_ID no está definida")
+    logger.info("✅ Cliente OpenAI inicializado")
 except Exception as e:
-    logger.error(f"Error al inicializar el cliente OpenAI: {str(e)}")
+    logger.error(f"❌ Error al inicializar OpenAI: {e}", exc_info=True)
     openai_client = None
 
-# ── rutas ──────────────────────────────────────────────────────
+# ── Rutas ──────────────────────────────────────────────────────
 @app.get("/")
 def home():
-    logger.info("Acceso a la ruta principal")
     return "Florence bot está en línea y operativo. 🚀"
+
 
 @app.post("/webhook")
 def webhook():
-    """Recibe el mensaje de WhatsApp (Twilio) y responde."""
+    """Endpoint que Twilio llama con cada mensaje entrante de WhatsApp."""
+    # Si el cliente no existe devolvemos un mensaje genérico
+    if not openai_client:
+        resp = MessagingResponse()
+        resp.message("Lo siento, el bot no está disponible.")
+        return str(resp)
+
+    incoming = request.values.get("Body", "").strip()
+    from_number = request.values.get("From", "unknown")
+    logger.info(f"Mensaje de {from_number}: {incoming!r}")
+
+    if not incoming:
+        abort(400, "Body vacío")
+
     try:
-        # Verificar si el cliente OpenAI está disponible
-        if not openai_client:
-            logger.error("No se puede procesar la solicitud: cliente OpenAI no disponible")
-            response = MessagingResponse()
-            response.message("Lo siento, hay un problema de configuración. Por favor contacta al administrador.")
-            return str(response)
-
-        # Obtener el mensaje entrante
-        incoming = request.values.get("Body", "").strip()
-        from_number = request.values.get("From", "unknown")
-        
-        logger.info(f"Mensaje recibido de {from_number}: {incoming[:20]}...")
-        
-        if not incoming:
-            logger.warning("Mensaje vacío recibido")
-            abort(400, "No Body")
-
-        # 1. Creamos un hilo
+        # 1. Crear hilo
         thread = openai_client.beta.threads.create()
-        logger.info(f"Hilo creado: {thread.id}")
-
-        # 2. Añadimos mensaje del usuario
+        # 2. Añadir mensaje del usuario
         openai_client.beta.threads.messages.create(
             thread_id=thread.id,
             role="user",
             content=incoming,
         )
-        logger.info("Mensaje añadido al hilo")
-
-        # 3. Lanzamos la ejecución
+        # 3. Ejecutar el assistant
         run = openai_client.beta.threads.runs.create(
             thread_id=thread.id,
             assistant_id=ASSISTANT_ID,
         )
-        logger.info(f"Ejecución iniciada: {run.id}")
 
-        # 4. Esperamos máx 30 s a que termine
-        for i in range(30):
+        # 4. Esperar (máx 30 s)
+        for _ in range(30):
             run = openai_client.beta.threads.runs.retrieve(
                 thread_id=thread.id, run_id=run.id
             )
             if run.status == "completed":
-                logger.info(f"Ejecución completada después de {i+1} segundos")
                 break
-            elif run.status in ["failed", "cancelled", "expired"]:
-                logger.error(f"Ejecución terminada con estado: {run.status}")
-                answer = f"🤖 Ocurrió un error: {run.status}. Por favor intenta nuevamente."
-                twiml = MessagingResponse()
-                twiml.message(answer)
-                return str(twiml)
+            if run.status in {"failed", "cancelled", "expired"}:
+                raise RuntimeError(f"Ejecución terminada con estado {run.status}")
             time.sleep(1)
         else:
-            logger.warning("Tiempo de espera agotado después de 30 segundos")
-            answer = "🤖 Tardo demasiado; inténtalo de nuevo en un minuto."
-            twiml = MessagingResponse()
-            twiml.message(answer)
-            return str(twiml)
+            raise TimeoutError("La generación tomó >30 s")
 
-        # 5. Leemos la respuesta del asistente
+        # 5. Obtener la respuesta del assistant
         msgs = openai_client.beta.threads.messages.list(thread_id=thread.id)
         answer = next(
             (m.content[0].text.value for m in msgs.data if m.role == "assistant"),
-            "Lo siento, no pude generar respuesta."
+            "Lo siento, no pude generar respuesta.",
         )
-        logger.info(f"Respuesta generada: {answer[:50]}...")
 
-        # 6. Respondemos a Twilio
-        twiml = MessagingResponse()
-        twiml.message(answer)
-        return str(twiml)
-        
     except Exception as e:
-        logger.error(f"Error en webhook: {str(e)}", exc_info=True)
-        twiml = MessagingResponse()
-        twiml.message("Lo siento, ocurrió un error al procesar tu mensaje. Inténtalo nuevamente más tarde.")
-        return str(twiml)
+        logger.error(f"Error en webhook: {e}", exc_info=True)
+        answer = "🤖 Ocurrió un error interno. Inténtalo de nuevo en unos minutos."
 
+    # 6. Responder a Twilio
+    resp = MessagingResponse()
+    resp.message(answer)
+    return str(resp)
+
+
+# ── Main local (Render usa gunicorn) ───────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
