@@ -1,4 +1,6 @@
 Flask==2.3.2
-openai==1.23.0     # ≥1.22.0 soporta assistants v2
-twilio==8.10.1
 gunicorn==21.2.0
+openai==1.23.2      # SDK v2 (funciona con Assistants v2)
+httpx==0.26.0       # 👈 última versión que acepta proxies=
+twilio==8.10.1
+tinydb==4.8.0
